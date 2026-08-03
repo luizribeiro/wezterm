@@ -836,8 +836,34 @@ impl<'a> ClusterResolver<'a> {
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::locator::FontDataSource;
     use crate::FontDatabase;
     use config::FontAttributes;
+    use termwiz::cell::CellAttributes;
+    use termwiz::surface::line::Line;
+
+    fn jetbrains_mono() -> ParsedFont {
+        let db = FontDatabase::with_built_in().unwrap();
+        db.resolve(
+            &FontAttributes {
+                family: "JetBrains Mono".into(),
+                stretch: Default::default(),
+                weight: Default::default(),
+                is_fallback: false,
+                is_synthetic: false,
+                style: Default::default(),
+                freetype_load_flags: None,
+                freetype_load_target: None,
+                freetype_render_target: None,
+                harfbuzz_features: None,
+                scale: None,
+                assume_emoji_presentation: None,
+            },
+            14,
+        )
+        .unwrap()
+        .clone()
+    }
 
     #[test]
     fn ligatures() {
@@ -846,27 +872,7 @@ mod test {
             .filter_level(log::LevelFilter::Trace)
             .try_init();
 
-        let db = FontDatabase::with_built_in().unwrap();
-        let handle = db
-            .resolve(
-                &FontAttributes {
-                    family: "JetBrains Mono".into(),
-                    stretch: Default::default(),
-                    weight: Default::default(),
-                    is_fallback: false,
-                    is_synthetic: false,
-                    style: Default::default(),
-                    freetype_load_flags: None,
-                    freetype_load_target: None,
-                    freetype_render_target: None,
-                    harfbuzz_features: None,
-                    scale: None,
-                    assume_emoji_presentation: None,
-                },
-                14,
-            )
-            .unwrap()
-            .clone();
+        let handle = jetbrains_mono();
 
         let config = config::configuration();
 
@@ -1238,5 +1244,49 @@ mod test {
 "#
             );
         }
+    }
+
+    /// A font can be uninstalled, or have its path invalidated by an OS update,
+    /// after we resolved the fallback list but before we ever opened it. Shaping
+    /// a glyph that falls through to it must not take down the process.
+    /// <https://github.com/wezterm/wezterm/issues/6157>
+    #[test]
+    fn fallback_font_that_cannot_be_opened() {
+        let mut vanished = jetbrains_mono();
+        vanished.handle.source = FontDataSource::OnDisk("/wezterm/no/such/font.ttf".into());
+
+        let config = config::configuration();
+        let shaper = HarfbuzzShaper::new(&config, &[jetbrains_mono(), vanished]).unwrap();
+
+        // U+10000 is absent from JetBrains Mono, so shaping falls through to the
+        // font we cannot open. The "abc" prefix leaves it at a non-zero byte
+        // offset within the cluster, and it is 4 bytes where its replacement is
+        // 3; either of those alone is enough to make the substituted placeholder
+        // string be indexed with a range that does not belong to it.
+        let line = Line::from_text("abc\u{10000}", &CellAttributes::default(), 0, None);
+        let clusters = line.cluster(None);
+        assert_eq!(clusters.len(), 1, "{clusters:?}");
+        let cluster = &clusters[0];
+        let presentation_width = PresentationWidth::with_cluster(cluster);
+
+        let mut no_glyphs = vec![];
+        let info = shaper
+            .shape(
+                &cluster.text,
+                10.,
+                72,
+                &mut no_glyphs,
+                Some(cluster.presentation),
+                cluster.direction,
+                None,
+                Some(&presentation_width),
+            )
+            .unwrap();
+
+        assert_eq!(
+            info.iter().map(|g| g.num_cells as usize).sum::<usize>(),
+            cluster.width,
+            "{info:?}"
+        );
     }
 }
