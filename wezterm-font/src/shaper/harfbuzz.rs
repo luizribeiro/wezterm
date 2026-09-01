@@ -1289,4 +1289,45 @@ mod test {
             "{info:?}"
         );
     }
+
+    /// A fallback font whose file opens fine but whose sizing fails routes
+    /// an error into do_shape's recovery path, which substitutes a string of
+    /// placeholder characters but shapes it with the original text's byte
+    /// range. Since scale is an ordinary per-font config parameter, no font
+    /// file race is needed to get here.
+    /// <https://github.com/wezterm/wezterm/issues/6157>
+    #[test]
+    fn fallback_font_that_cannot_be_sized() {
+        let mut unsizable = jetbrains_mono();
+        unsizable.scale = Some(1e6);
+
+        let config = config::configuration();
+        let shaper = HarfbuzzShaper::new(&config, &[jetbrains_mono(), unsizable]).unwrap();
+
+        let line = Line::from_text("abc\u{10000}", &CellAttributes::default(), 0, None);
+        let clusters = line.cluster(None);
+        assert_eq!(clusters.len(), 1, "{clusters:?}");
+        let cluster = &clusters[0];
+        let presentation_width = PresentationWidth::with_cluster(cluster);
+
+        let mut no_glyphs = vec![];
+        let info = shaper
+            .shape(
+                &cluster.text,
+                10.,
+                72,
+                &mut no_glyphs,
+                Some(cluster.presentation),
+                cluster.direction,
+                None,
+                Some(&presentation_width),
+            )
+            .unwrap();
+
+        assert_eq!(
+            info.iter().map(|g| g.num_cells as usize).sum::<usize>(),
+            cluster.width,
+            "{info:?}"
+        );
+    }
 }
